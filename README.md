@@ -1,6 +1,10 @@
 [Tiếng Việt](README.vi.md) | English
 
+<p align="center"><img src="docs/banner.jpg" alt="Orion MCP — Orion constellation and the glowing Orion Nebula" width="100%"></p>
+
 # Orion MCP
+
+*Named after the hunter: practice as hunting your own bugs.*
 
 Orion is the practice lab engine of the learner's MCP ecosystem: hands-on exercises checked by real tests (pytest, node --test, or declared commands), tutoring ladder hints that never reach the solution, predict-then-run before each run, attempt history, and exports for the Polaris error log ("Sổ lỗi") and Vega memory cards.
 

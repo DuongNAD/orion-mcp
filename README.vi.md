@@ -1,6 +1,10 @@
 [English](README.md) | Tiếng Việt
 
+<p align="center"><img src="docs/banner.jpg" alt="Orion MCP — chòm sao Lạp Hộ và Tinh vân Lạp Hộ rực sáng" width="100%"></p>
+
 # Orion MCP
+
+*Được đặt tên theo chàng thợ săn: thực hành chính là săn tìm lỗi của chính mình.*
 
 Orion là công cụ phòng thực hành (practice lab) trong hệ sinh thái học tập của người học: các bài tập thực hành được kiểm thử thực tế (pytest, node --test, hoặc lệnh tự định nghĩa), hệ thống gợi ý theo thang bậc thang (tutoring ladder) không bao giờ tiết lộ lời giải, cơ chế dự đoán trước khi chạy (predict-then-run), lưu vết lịch sử làm bài, và xuất dữ liệu sang Sổ lỗi Polaris cùng Thẻ ghi nhớ Vega.
 
