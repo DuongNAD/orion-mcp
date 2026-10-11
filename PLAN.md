@@ -66,4 +66,4 @@ brackets parse), a stated interface in the README, a TODO-only starter, hints fo
 project's TASKS.md.
 
 ## Status
-- 2026-10-11: plan written; v0.1 to be built.
+- 2026-10-11: plan written; v0.1 built and verified (build --check types OK, e2e passes all checks, CLI help/version verified).
