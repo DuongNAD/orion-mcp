@@ -2,13 +2,21 @@ import { existsSync, readdirSync } from "node:fs";
 import { appendFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TestRunResult } from "./runner.js";
-import type {
-  AttemptRecord,
-  HintRecord,
-  HistoryRecord,
-  LabSpec,
+import {
+  isMainAttempt,
+  type AttemptRecord,
+  type HintRecord,
+  type HistoryRecord,
+  type LabSpec,
+  type StageRecord,
 } from "./schema.js";
 import { readJson } from "./util.js";
+import {
+  computeStageStates,
+  formatLadderLines,
+  nextUnfinished,
+  type StageState,
+} from "./warmup.js";
 
 export function attemptsFilePath(labDir: string): string {
   return join(labDir, "orion-attempts.jsonl");
@@ -46,10 +54,21 @@ export async function appendHintRecord(labDir: string, record: HintRecord): Prom
   await appendFile(p, line, "utf8");
 }
 
-/** Computes the gap between the learner's prediction and the actual test run */
+/** Appends a warm-up stage event (an example stage marked as studied). */
+export async function appendStageRecord(labDir: string, record: StageRecord): Promise<void> {
+  const p = attemptsFilePath(labDir);
+  const line = JSON.stringify(record) + "\n";
+  await appendFile(p, line, "utf8");
+}
+
+/**
+ * Computes the gap between the learner's prediction and the actual test run.
+ * `stageId` is set for warm-up stage runs, whose completion is not the lab's Definition of Done.
+ */
 export function computePredictionGap(
   prediction: string | null | undefined,
   runResult: TestRunResult,
+  opts: { stageId?: string } = {},
 ): string | null {
   if (!prediction || !prediction.trim()) return null;
 
@@ -57,7 +76,8 @@ export function computePredictionGap(
   const failingNames = failing.map((t) => t.name).join(", ");
 
   if (runResult.passed) {
-    return `Dự đoán: "${prediction}". Thực tế: Đạt toàn bộ ${runResult.total}/${runResult.total} bài kiểm tra (100%). Hoàn thành Definition of Done.`;
+    const done = opts.stageId ? `Hoàn thành bậc khởi động ${opts.stageId}.` : "Hoàn thành Definition of Done.";
+    return `Dự đoán: "${prediction}". Thực tế: Đạt toàn bộ ${runResult.total}/${runResult.total} bài kiểm tra (100%). ${done}`;
   }
 
   const gapDetail = failingNames
@@ -83,11 +103,18 @@ export interface LabStatusData {
   hintsUsed: Record<string, number>;
   latestAttempt?: AttemptRecord;
   dodStatus: Array<{ item: string; completed: boolean }>;
+  /** Warm-up ladder stages (PRIMM) with their state; empty when the lab has no warm-up. */
+  warmup: StageState[];
+  /** First warm-up stage that is not finished. */
+  nextWarmup?: StageState;
+  /** Entry file of the main lab (the final "make" stage of the ladder). */
+  entry: string;
 }
 
 export async function getLabStatus(labDir: string, spec: LabSpec): Promise<LabStatusData> {
   const history = await readAttemptsLog(labDir);
-  const attempts = history.filter((r): r is AttemptRecord => r.type === "attempt" || ("tests" in r && !("check" in r)));
+  // Only main-lab attempts count here: warm-up stage runs carry a `stage` field.
+  const attempts = history.filter(isMainAttempt);
   const hintRecords = history.filter((r): r is HintRecord => r.type === "hint");
 
   // Aggregate hints used per check
@@ -117,6 +144,8 @@ export async function getLabStatus(labDir: string, spec: LabSpec): Promise<LabSt
     completed: passed,
   }));
 
+  const warmup = computeStageStates(spec.warmup, history);
+
   return {
     labDir,
     title: spec.title,
@@ -131,7 +160,17 @@ export async function getLabStatus(labDir: string, spec: LabSpec): Promise<LabSt
     hintsUsed,
     latestAttempt,
     dodStatus,
+    warmup,
+    nextWarmup: nextUnfinished(warmup),
+    entry: spec.entry,
   };
+}
+
+/** Status of the main task, as shown at the end of the ladder. */
+export function mainStatusText(data: LabStatusData): string {
+  if (data.status === "completed") return "ĐÃ HOÀN THÀNH";
+  if (data.status === "in_progress") return `ĐANG LÀM (${data.attemptsCount} lần chạy)`;
+  return "CHƯA BẮT ĐẦU";
 }
 
 export function formatLabStatusReport(data: LabStatusData): string {
@@ -152,6 +191,10 @@ export function formatLabStatusReport(data: LabStatusData): string {
       data.timeboxMinutes ? ` / Giới hạn timebox: ${data.timeboxMinutes} phút` : ""
     }`,
   ];
+
+  if (data.warmup.length > 0) {
+    lines.push("", ...formatLadderLines(data.warmup, { entry: data.entry, statusText: mainStatusText(data) }));
+  }
 
   if (data.latestAttempt) {
     lines.push(
@@ -290,10 +333,10 @@ export async function getGlobalStats(rootDir = process.cwd()): Promise<GlobalSta
       }
     }
 
-    // Check failures from history
+    // Check failures from history (main-lab attempts only; warm-up stage runs are separate)
     const history = await readAttemptsLog(ldir);
     for (const rec of history) {
-      if (rec.type === "attempt" && rec.tests) {
+      if (isMainAttempt(rec) && rec.type === "attempt" && rec.tests) {
         for (const t of rec.tests) {
           if (t.status === "failed" || t.status === "error") {
             failingCheckCounts[t.name] = (failingCheckCounts[t.name] ?? 0) + 1;

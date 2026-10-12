@@ -5,11 +5,65 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { AttemptTestItem } from "./schema.js";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 export function errMsg(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/* ───────── Path and text helpers ───────── */
+
+/** Forward-slash form of a path (display and cross-platform comparison). */
+export function toPosix(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
+/** Normalizes a lab-relative path for comparison: forward slashes, no "." segments, no trailing slash. */
+export function normRelPath(p: string): string {
+  return toPosix(p)
+    .split("/")
+    .filter((s) => s !== "" && s !== ".")
+    .join("/");
+}
+
+/** Returns a problem description when `p` is not a safe lab-relative path, otherwise undefined. */
+export function relPathProblem(p: string): string | undefined {
+  if (!p.trim()) return "must not be empty";
+  if (p !== p.trim()) return "must not have leading or trailing spaces";
+  const posix = toPosix(p);
+  if (posix.startsWith("/") || /^[A-Za-z]:/.test(posix)) {
+    return "must be relative to the lab folder (no absolute path)";
+  }
+  if (posix.split("/").some((s) => s === "..")) {
+    return 'must stay inside the lab folder (no ".." segment)';
+  }
+  if (/[<>:"|?*\u0000-\u001f]/.test(posix)) {
+    return 'contains a character not allowed on Windows/exFAT (< > : " | ? *)';
+  }
+  if (!normRelPath(p)) return "must not be empty";
+  return undefined;
+}
+
+/** True when two lab-relative paths are equal or one contains the other (case-insensitive: Windows/exFAT). */
+export function pathsOverlap(a: string, b: string): boolean {
+  const x = normRelPath(a).toLowerCase();
+  const y = normRelPath(b).toLowerCase();
+  if (!x || !y) return false;
+  return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
+}
+
+/** Truncates to at most `max` UTF-16 units with an ellipsis, never splitting a surrogate pair. */
+export function clip(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let cut = s.slice(0, Math.max(0, max - 1));
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return cut.trimEnd() + "…";
+}
+
+export function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export const hash = (s: string, n = 8): string =>

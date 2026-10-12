@@ -1,7 +1,7 @@
 {
   "name": "orion-mcp",
-  "version": "0.1.0",
-  "description": "Orion MCP: Practice lab engine with real test runners, tutoring ladder hints, and prediction gap tracking",
+  "version": "0.2.0",
+  "description": "Orion MCP: Practice lab engine with real test runners, a warm-up ladder (PRIMM), tutoring ladder hints, prediction gap tracking, and a Vega inbox export",
   "type": "module",
   "bin": {
     "orion": "./dist/orion.mjs"

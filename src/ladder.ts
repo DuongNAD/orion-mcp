@@ -1,5 +1,5 @@
 import type { LabCheck, LabSpec } from "./schema.js";
-import { closest } from "./util.js";
+import { closest, toPosix } from "./util.js";
 
 export const LADDER_LEVEL_NAMES = [
   "Level 1: Point at the symptom or state",
@@ -8,6 +8,9 @@ export const LADDER_LEVEL_NAMES = [
   "Level 4: Pseudocode or API signatures",
 ] as const;
 
+/** From this ladder level on, a check with a `trace` links the counter-example to Mira. */
+export const MIRA_TRACE_MIN_LEVEL = 3;
+
 export interface HintOutcome {
   checkKey: string;
   concept: string;
@@ -15,6 +18,17 @@ export interface HintOutcome {
   levelName: string;
   hint: string;
   remainingHints: number;
+  /** Python call expression reproducing the minimal counter-example (from lab.json), if the check has one. */
+  trace?: string;
+}
+
+/**
+ * The Mira hand-off line appended to a hint at Level 3+ when the check has a `trace`.
+ * Mira is a sibling MCP that records a real line-by-line trace of the learner's own entry file.
+ * Both values are JSON strings so quotes inside the call expression stay unambiguous.
+ */
+export function miraTraceLine(labDir: string, trace: string): string {
+  return `Dò code với Mira: mira_record { lab: ${JSON.stringify(toPosix(labDir))}, call: ${JSON.stringify(trace)} }`;
 }
 
 /** Matches a test item (id / name) to a check key or pattern in lab.checks */
@@ -69,17 +83,11 @@ export function getLevel1HintForTest(
   return { concept: match.check.concept, hint: l1 };
 }
 
-/** Resolves the requested or next hint for a check according to the tutoring ladder */
-export function getHintForCheck(
-  lab: LabSpec,
-  checkQuery: string,
-  requestedLevel?: number,
-  recordedLevel = 0,
-): HintOutcome {
+/** Resolves a check query (exact key, then suffix/substring) to a lab.json check, or throws with suggestions. */
+export function resolveCheck(lab: LabSpec, checkQuery: string): { key: string; check: LabCheck } {
   const checks = lab.checks;
   const keys = Object.keys(checks);
 
-  // Find target check
   let targetKey: string | undefined;
   let targetCheck: LabCheck | undefined;
 
@@ -110,6 +118,17 @@ export function getHintForCheck(
       } Available checks: ${keys.join(", ")}`,
     );
   }
+  return { key: targetKey, check: targetCheck };
+}
+
+/** Resolves the requested or next hint for a check according to the tutoring ladder */
+export function getHintForCheck(
+  lab: LabSpec,
+  checkQuery: string,
+  requestedLevel?: number,
+  recordedLevel = 0,
+): HintOutcome {
+  const { key: targetKey, check: targetCheck } = resolveCheck(lab, checkQuery);
 
   // Determine target ladder level
   let targetLevel: number;
@@ -150,5 +169,6 @@ export function getHintForCheck(
     levelName,
     hint: hintText,
     remainingHints,
+    ...(targetCheck.trace ? { trace: targetCheck.trace } : {}),
   };
 }

@@ -5,12 +5,13 @@
  *   node dist/orion.mjs run <lab>           -> CLI run tests with prediction gap
  *   node dist/orion.mjs predict <lab> <p>   -> CLI store prediction for next run
  *   node dist/orion.mjs hint <lab> <c> [l]  -> CLI request tutoring hint (L1..L4)
- *   node dist/orion.mjs status <lab>        -> CLI view lab status & DoD
+ *   node dist/orion.mjs stage <lab> [<stage>] [run|done|status] -> CLI warm-up ladder (PRIMM) stage
+ *   node dist/orion.mjs status <lab>        -> CLI view lab status, ladder & DoD
  *   node dist/orion.mjs stats [root]        -> CLI view global practice stats
- *   node dist/orion.mjs export <lab>        -> CLI export to Polaris & Vega
+ *   node dist/orion.mjs export <lab> [--to-vega] [--hub <path>] -> CLI export to Polaris & Vega (+ Vega inbox)
  *   node dist/orion.mjs new <dir> <spec>    -> CLI scaffold new lab
  *   node dist/orion.mjs guide [topic]       -> CLI view guide
- *   node dist/orion.mjs version             -> 0.1.0
+ *   node dist/orion.mjs version             -> 0.2.0
  *   node dist/orion.mjs help                -> CLI command list
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -21,14 +22,23 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { GUIDE_TOPICS, getGuideTopic } from "./guide.js";
 import {
-  appendHintRecord,
   formatGlobalStatsReport,
   formatLabStatusReport,
   getGlobalStats,
   getLabStatus,
 } from "./history.js";
-import { exportLab, loadLab, runLab, saveLab, scaffoldLab } from "./lab.js";
-import { getHintForCheck } from "./ladder.js";
+import {
+  exportLab,
+  loadLab,
+  requestHint,
+  runLab,
+  saveLab,
+  scaffoldLab,
+  stageAction,
+  type HintResult,
+  type StageAction,
+} from "./lab.js";
+import { describeInboxOutcome } from "./vega.js";
 import { errMsg, VERSION } from "./util.js";
 
 export * from "./guide.js";
@@ -38,6 +48,8 @@ export * from "./ladder.js";
 export * from "./runner.js";
 export * from "./schema.js";
 export * from "./util.js";
+export * from "./vega.js";
+export * from "./warmup.js";
 
 type Content = { type: "text"; text: string };
 type ToolResult = { content: Content[]; isError?: boolean };
@@ -55,26 +67,44 @@ async function safe(fn: () => Promise<ToolResult>): Promise<ToolResult> {
   }
 }
 
-export const INSTRUCTIONS = `Orion MCP is the practice lab engine of the learning hub: hands-on exercises checked by real tests, tutoring ladder hints, predict-then-run, and attempt tracking.
+export const INSTRUCTIONS = `Orion MCP is the practice lab engine of the learning hub: hands-on exercises checked by real tests, an optional warm-up ladder (PRIMM) before the main task, tutoring ladder hints, predict-then-run, and attempt tracking.
 
 Workflow:
-1. orion_predict { lab, prediction } to record your mental model before executing tests.
-2. orion_run { lab } to execute the tests with a timeout, evaluate the prediction gap, and inspect failing checks with Level 1 hints only.
-3. If blocked, orion_hint { lab, check } to escalate tutoring hints one level at a time (max Level 4).
-4. Fix the implementation in the lab entry file, then repeat predict -> run.
-5. orion_status { lab } to inspect progress, attempts, hints used, and DoD completion.
-6. orion_export { lab } to export repeated mistakes to Polaris error log and Vega memory cards.
+1. orion_status { lab } shows the ladder (Khởi động -> Làm chính). If the lab has a warm-up and the learner is a novice, go through it first: orion_stage { lab, stage, action: "done" } after studying an example stage, orion_stage { lab, stage, action: "run" } for complete / parsons / modify stages. It is never blocking: the learner may skip it.
+2. orion_predict { lab, prediction } to record your mental model before executing tests.
+3. orion_run { lab } to execute the tests with a timeout, evaluate the prediction gap, and inspect failing checks with Level 1 hints only. On the first failing attempts it also names the next unfinished warm-up stage.
+4. If blocked, orion_hint { lab, check } to escalate tutoring hints one level at a time (max Level 4). At Level 3+ a check that has a trace adds a Mira link: mira_record { lab, call }.
+5. Fix the implementation in the lab entry file, then repeat predict -> run.
+6. orion_status { lab } to inspect progress, attempts, hints used, warm-up stages, and DoD completion.
+7. orion_export { lab } to export repeated mistakes to Polaris error log and Vega memory cards; with to_vega: true it also writes the card candidates as one Vega inbox file (<hub>/.vega/inbox/), so Vega stays the single review queue.
 
 Rules:
 - Never write the learner's solution: starter files contain only docstrings and TODOs; Orion never provides Level 5 hints (full solution code).
+- Warm-up material is an ISOMORPHIC problem (same solution structure, different surface), never the lab's own solution. orion_new_lab writes warm-up files only from text supplied in the spec (warmupFiles) or as TODO skeletons; it never generates code itself.
 - Tutoring ladder escalation: hints climb one level at a time (1: symptom, 2: guiding questions, 3: minimal counter-example, 4: pseudocode/signatures).
 - Real tests: run locally with pytest, node --test, or declared commands; never guess results.
 - Predict first: always capture the mental model before execution; learning happens in the gap.
 - Learner fit: learner-facing text and READMEs in the learner's language (Vietnamese); no emoji.
-- Clean files: only lab.json and append-only orion-attempts.jsonl; no recursive scans of D:.
+- Clean files: per lab only lab.json, the append-only orion-attempts.jsonl, and the stage and test files named in lab.json; the only file written outside a lab is a new Vega inbox file on request; no recursive scans of D:.
 
 Done when:
 All Definition of Done (DoD) test checks pass with real test runners, attempts are recorded, and gaps are analyzed.`;
+
+/** The hint message shown by orion_hint: level, content, then the Mira link at Level 3+ for checks with a trace. */
+function formatHintMessage(res: HintResult): string {
+  const { outcome, miraLine } = res;
+  return [
+    `# Gợi ý bài thực hành: ${outcome.checkKey}`,
+    `- Concept: \`${outcome.concept}\``,
+    `- Bậc gợi ý: **Level ${outcome.level}/4: ${outcome.levelName}**`,
+    "",
+    "### Nội dung gợi ý:",
+    outcome.hint,
+    ...(miraLine ? ["", miraLine] : []),
+    "",
+    `> [!NOTE] Còn lại ${outcome.remainingHints} cấp độ gợi ý bậc thang. Orion không bao giờ cung cấp Level 5 (lời giải hoàn chỉnh).`,
+  ].join("\n");
+}
 
 export function createServer(): McpServer {
   const server = new McpServer({ name: "orion", version: VERSION }, { instructions: INSTRUCTIONS });
@@ -85,7 +115,7 @@ export function createServer(): McpServer {
     {
       title: "Orion Guide & Practice Lab Documentation",
       description:
-        "READ FIRST. Documentation on the 5-level tutoring ladder, lab format (lab.json), writing tests and hints, workflows, and runners. No argument = overview.",
+        "READ FIRST. Documentation on the 5-level tutoring ladder, the warm-up ladder (PRIMM), lab format (lab.json), writing tests and hints, workflows, and runners. No argument = overview.",
       inputSchema: {
         topic: z.enum(GUIDE_TOPICS).optional().describe(`Topic: ${GUIDE_TOPICS.join(" | ")}`),
       },
@@ -100,19 +130,37 @@ export function createServer(): McpServer {
     {
       title: "Scaffold New Practice Lab",
       description:
-        "Validate and scaffold a lab folder (lab.json, README.md, tests/, starter entry with TODOs). Refuses to write solution code (the spec has no solution field; starter bodies are TODOs / NotImplementedError). Never overwrites existing entry file.",
+        "Validate and scaffold a lab folder (lab.json, README.md, tests/, starter entry with TODOs). Refuses to write solution code (the spec has no solution field; starter bodies are TODOs / NotImplementedError). Never overwrites existing files. Optional warm-up ladder (PRIMM): spec.warmup holds 0-4 stages {id, kind: example | complete | parsons | modify, title, file, tests?, player?, note?}; spec.warmupFiles {<relative path>: <text>} supplies the isomorphic stage material and its tests (scaffold-only, not stored in lab.json), otherwise comment-only TODO skeletons are written. Warm-up material must be an isomorphic problem, never the lab's own solution; Orion never generates code itself. Checks may carry trace, a Python call expression that links Level 3+ hints to Mira.",
       inputSchema: {
         dir: z.string().min(1).describe("Target folder path for the new lab"),
-        spec: z.unknown().describe("Lab specification object (matching lab.json schema)"),
+        spec: z.unknown().describe("Lab specification object (matching lab.json schema, plus scaffold-only readme, testsContent, warmupFiles)"),
       },
       annotations: { readOnlyHint: false, openWorldHint: false },
     },
     async ({ dir, spec }) =>
       safe(async () => {
         const res = await scaffoldLab(dir, spec);
-        return text(
-          `Khởi tạo thành công bài thực hành tại: ${res.dir}\nCác tệp đã tạo: ${res.files.join(", ")}\nTiêu chuẩn hoàn thành (DoD): ${res.spec.dod.length} mục.`,
-        );
+        const lines = [
+          `Khởi tạo thành công bài thực hành tại: ${res.dir}`,
+          `Các tệp đã tạo: ${res.files.join(", ")}`,
+          `Tiêu chuẩn hoàn thành (DoD): ${res.spec.dod.length} mục.`,
+        ];
+        const stages = res.spec.warmup ?? [];
+        if (stages.length > 0) {
+          lines.push(`Thang khởi động (PRIMM): ${stages.length} bậc (${stages.map((s) => `${s.id}:${s.kind}`).join(", ")}), rồi Làm chính.`);
+          if (res.warmup.fromSpec.length > 0) {
+            lines.push(`- Tệp bậc ghi từ nội dung trong spec (warmupFiles): ${res.warmup.fromSpec.join(", ")}`);
+          }
+          if (res.warmup.skeleton.length > 0) {
+            lines.push(
+              `- Khung TODO chỉ có chú thích (người soạn lab thay bằng bài ĐẲNG CẤU, không phải lời giải của bài chính): ${res.warmup.skeleton.join(", ")}`,
+            );
+          }
+          if (res.warmup.kept.length > 0) {
+            lines.push(`- Giữ nguyên tệp đã tồn tại: ${res.warmup.kept.join(", ")}`);
+          }
+        }
+        return text(lines.join("\n"));
       }),
   );
 
@@ -122,7 +170,7 @@ export function createServer(): McpServer {
     {
       title: "Store Learner Prediction Before Run",
       description:
-        "Store the learner's prediction of the outcome before a run. The subsequent run evaluates and reports the gap between prediction and reality.",
+        "Store the learner's prediction of the outcome before a run. The next run (orion_run or orion_stage run) evaluates and reports the gap between prediction and reality.",
       inputSchema: {
         lab: z.string().min(1).describe("Path to the lab folder"),
         prediction: z.string().min(1).describe("Learner prediction of pass/fail outcome or behavior"),
@@ -147,7 +195,7 @@ export function createServer(): McpServer {
     {
       title: "Execute Tests and Return Compact Report",
       description:
-        "Run the tests with a timeout, parse results (JUnit XML / TAP), append an attempt line (time, passed/failed tests, duration, prediction and gap), and return a compact report with Level 1 hints only for failing checks.",
+        "Run the main tests with a timeout, parse results (JUnit XML / TAP), append an attempt line (time, passed/failed tests, duration, prediction and gap), and return a compact report with Level 1 hints only for failing checks. On the first failing attempts of a lab with a warm-up ladder it also names the next unfinished warm-up stage (never blocking).",
       inputSchema: {
         lab: z.string().min(1).describe("Path to the lab folder"),
       },
@@ -166,7 +214,7 @@ export function createServer(): McpServer {
     {
       title: "Request Next Tutoring Ladder Hint",
       description:
-        "Get the next ladder level hint for one failing check (Level 1: symptom, Level 2: questions, Level 3: counter-example, Level 4: pseudocode/signatures). Level 5 (full code) is NEVER provided. Usage is recorded.",
+        "Get the next ladder level hint for one failing check (Level 1: symptom, Level 2: questions, Level 3: counter-example, Level 4: pseudocode/signatures). Level 5 (full code) is NEVER provided. Usage is recorded. At Level 3+ for a check that has a trace, the reply adds a Mira link line: mira_record { lab, call }.",
       inputSchema: {
         lab: z.string().min(1).describe("Path to the lab folder"),
         check: z.string().min(1).describe("Check / test name to get hint for"),
@@ -175,40 +223,7 @@ export function createServer(): McpServer {
       annotations: { readOnlyHint: false, openWorldHint: false },
     },
     async ({ lab, check, level }) =>
-      safe(async () => {
-        const absDir = resolve(lab);
-        const spec = await loadLab(absDir);
-        const curLevel = spec.hintLevels?.[check] ?? 0;
-        const outcome = getHintForCheck(spec, check, level, curLevel);
-
-        // Update recorded level in lab.json
-        if (!spec.hintLevels) spec.hintLevels = {};
-        spec.hintLevels[outcome.checkKey] = outcome.level;
-        await saveLab(absDir, spec);
-
-        // Append to history
-        await appendHintRecord(absDir, {
-          type: "hint",
-          timestamp: new Date().toISOString(),
-          check: outcome.checkKey,
-          level: outcome.level,
-          concept: outcome.concept,
-          hint: outcome.hint,
-        });
-
-        const msg = [
-          `# Gợi ý bài thực hành: ${outcome.checkKey}`,
-          `- Concept: \`${outcome.concept}\``,
-          `- Bậc gợi ý: **Level ${outcome.level}/4: ${outcome.levelName}**`,
-          "",
-          "### Nội dung gợi ý:",
-          outcome.hint,
-          "",
-          `> [!NOTE] Còn lại ${outcome.remainingHints} cấp độ gợi ý bậc thang. Orion không bao giờ cung cấp Level 5 (lời giải hoàn chỉnh).`,
-        ].join("\n");
-
-        return text(msg);
-      }),
+      safe(async () => text(formatHintMessage(await requestHint(lab, check, level)))),
   );
 
   /* 6. orion_status */
@@ -217,7 +232,7 @@ export function createServer(): McpServer {
     {
       title: "Inspect Lab Status and History",
       description:
-        "Inspect attempts, total practice time, hints used per check, first-pass success, and Definition of Done (DoD) status for a lab.",
+        "Inspect attempts, total practice time, hints used per check, first-pass success, the warm-up ladder (Khởi động -> Làm chính) with each stage state, and Definition of Done (DoD) status for a lab.",
       inputSchema: {
         lab: z.string().min(1).describe("Path to the lab folder"),
       },
@@ -258,16 +273,25 @@ export function createServer(): McpServer {
     {
       title: "Export Repeated Mistakes to Polaris Error Log and Vega Cards",
       description:
-        "Export error-log entries in the Polaris 'Sổ lỗi' shape for checks that failed repeatedly (prediction vs result, concept, hints used) and Vega memory card candidates as JSON ready for polaris_errorlog_add and vega_add.",
+        "Export error-log entries in the Polaris 'Sổ lỗi' shape for checks that failed repeatedly (prediction vs result, concept, hints used) and Vega memory card candidates as JSON ready for polaris_errorlog_add and vega_add. With to_vega: true it also writes the card candidates as one new inbox file <hub>/.vega/inbox/orion-<timestamp>-<hex>.jsonl (contract vega-card-inbox.v1: key orion:<lab folder>:<check>, origin orion-attempt; validated, written atomically, never rewriting an existing file).",
       inputSchema: {
         lab: z.string().min(1).describe("Path to the lab folder"),
+        to_vega: z
+          .boolean()
+          .optional()
+          .describe("Also write the Vega card candidates as one inbox file under <hub>/.vega/inbox/"),
+        hub: z
+          .string()
+          .optional()
+          .describe("Learning hub root for the Vega inbox (default: env ORION_HUB, then env POLARIS_HUB, then D:/02_Learning_Knowledge); used only with to_vega"),
       },
-      annotations: { readOnlyHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({ lab }) =>
+    async ({ lab, to_vega, hub }) =>
       safe(async () => {
         const absDir = resolve(lab);
-        const exportData = await exportLab(absDir);
+        const exportData = await exportLab(absDir, { toVega: to_vega === true, hub });
+        const inbox = exportData.vegaInbox;
         const output = [
           exportData.summary,
           "",
@@ -276,13 +300,40 @@ export function createServer(): McpServer {
             {
               errorLogEntries: exportData.errorLogEntries,
               vegaCards: exportData.vegaCards,
+              ...(inbox ? { vegaInbox: inbox } : {}),
             },
             null,
             2,
           ),
           "```",
+          ...(inbox ? ["", ...describeInboxOutcome(inbox)] : []),
         ].join("\n");
-        return text(output);
+        const nothingWritten = inbox !== undefined && inbox.written === 0 && inbox.rejected.length > 0;
+        return text(output, nothingWritten);
+      }),
+  );
+
+  /* 9. orion_stage */
+  server.registerTool(
+    "orion_stage",
+    {
+      title: "Warm-up Ladder Stage (PRIMM): Run, Mark Studied, or Inspect",
+      description:
+        "Work the optional warm-up ladder of a lab (stages in lab.json warmup, then the main task). action run: run that stage's tests with the same runner (attempt lines get a stage field; a pending prediction is consumed). action done: mark an example stage as studied. action status: per-stage state (omit stage for the whole ladder). Warm-up material is an isomorphic problem, never the lab's own solution. Never blocking: the learner may skip the ladder.",
+      inputSchema: {
+        lab: z.string().min(1).describe("Path to the lab folder"),
+        stage: z
+          .string()
+          .optional()
+          .describe("Stage id from lab.json warmup (or its 1-based position). Required for run and done; omit with status for the whole ladder"),
+        action: z.enum(["run", "done", "status"]).describe("run | done | status"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ lab, stage, action }) =>
+      safe(async () => {
+        const res = await stageAction(lab, stage, action);
+        return text(res.report);
       }),
   );
 
@@ -297,10 +348,37 @@ export async function startMcp(): Promise<void> {
 
 /* ───────── CLI Command Dispatcher ───────── */
 
+const STAGE_ACTIONS: readonly string[] = ["run", "done", "status"];
+const isStageAction = (s: string | undefined): s is StageAction => s !== undefined && STAGE_ACTIONS.includes(s);
+
 export async function cli(argv: string[]): Promise<number> {
   const cmd = argv[0]?.toLowerCase() ?? "help";
   const isJson = argv.includes("--json");
-  const filteredArgs = argv.filter((a) => a !== "--json");
+  const toVega = argv.includes("--to-vega");
+
+  // Flags are removed from the positional arguments: --json, --to-vega, --hub <path> | --hub=<path>.
+  let hubArg: string | undefined;
+  let hubFlagMissingValue = false;
+  const filteredArgs: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--json" || a === "--to-vega") continue;
+    if (a === "--hub") {
+      const v = argv[i + 1];
+      if (v === undefined || v.startsWith("--")) {
+        hubFlagMissingValue = true;
+      } else {
+        hubArg = v;
+        i++;
+      }
+      continue;
+    }
+    if (a.startsWith("--hub=")) {
+      hubArg = a.slice("--hub=".length);
+      continue;
+    }
+    filteredArgs.push(a);
+  }
 
   switch (cmd) {
     case "version":
@@ -322,16 +400,19 @@ Commands:
   run <lab>                   Execute lab tests and return compact report
   predict <lab> <text>        Store learner prediction before next test run
   hint <lab> <check> [level]  Request tutoring ladder hint (Level 1..4)
-  status <lab>                View lab status, attempts, hints used, and DoD
+  stage <lab> [stage] [action]  Warm-up ladder (PRIMM) stage: run | done | status (default status)
+  status <lab>                View lab status, attempts, hints used, ladder, and DoD
   stats [root]                View global practice stats across all labs
   export <lab>                Export mistakes to Polaris error log and Vega cards
   new <dir> <spec>            Scaffold new lab from spec file or JSON string
   guide [topic]               View Orion guide and tutoring ladder rules
-  version                     Print Orion MCP version (0.1.0)
+  version                     Print Orion MCP version (${VERSION})
   help                        Show this help message
 
 Options:
-  --json                      Output machine-readable JSON`);
+  --json                      Output machine-readable JSON
+  --to-vega                   export: also write the Vega inbox file (<hub>/.vega/inbox/)
+  --hub <path>                export --to-vega: hub root (default: env ORION_HUB, env POLARIS_HUB, D:/02_Learning_Knowledge)`);
       return 0;
     }
 
@@ -364,6 +445,9 @@ Options:
         console.log(JSON.stringify(res, null, 2));
       } else {
         console.log(`Scaffolded lab at: ${res.dir}\nFiles created: ${res.files.join(", ")}`);
+        if (res.warmup.skeleton.length > 0) {
+          console.log(`Warm-up TODO skeletons (replace with an isomorphic problem): ${res.warmup.skeleton.join(", ")}`);
+        }
       }
       return 0;
     }
@@ -411,30 +495,45 @@ Options:
         return 1;
       }
       const explicitLevel = levelStr ? parseInt(levelStr, 10) : undefined;
-      const absDir = resolve(labDir);
-      const spec = await loadLab(absDir);
-      const curLevel = spec.hintLevels?.[check] ?? 0;
-      const outcome = getHintForCheck(spec, check, explicitLevel, curLevel);
-
-      if (!spec.hintLevels) spec.hintLevels = {};
-      spec.hintLevels[outcome.checkKey] = outcome.level;
-      await saveLab(absDir, spec);
-
-      await appendHintRecord(absDir, {
-        type: "hint",
-        timestamp: new Date().toISOString(),
-        check: outcome.checkKey,
-        level: outcome.level,
-        concept: outcome.concept,
-        hint: outcome.hint,
-      });
+      const { outcome, miraLine } = await requestHint(labDir, check, explicitLevel);
 
       if (isJson) {
-        console.log(JSON.stringify(outcome, null, 2));
+        console.log(JSON.stringify({ ...outcome, ...(miraLine ? { mira: miraLine } : {}) }, null, 2));
       } else {
         console.log(`[${outcome.levelName}] ${outcome.checkKey} (${outcome.concept}):\n${outcome.hint}`);
+        if (miraLine) console.log(`\n${miraLine}`);
       }
       return 0;
+    }
+
+    case "stage": {
+      const labDir = filteredArgs[1];
+      const rest = filteredArgs.slice(2);
+      const usage = "Usage: orion stage <lab> [<stage>] [run|done|status] [--json]";
+      if (!labDir || rest.length > 2) {
+        console.error(usage);
+        return 1;
+      }
+      let stageId: string | undefined;
+      let action: StageAction = "status";
+      if (rest.length === 2) {
+        stageId = rest[0];
+        if (!isStageAction(rest[1])) {
+          console.error(usage);
+          return 1;
+        }
+        action = rest[1];
+      } else if (rest.length === 1) {
+        if (isStageAction(rest[0])) action = rest[0];
+        else stageId = rest[0];
+      }
+      const res = await stageAction(labDir, stageId, action);
+      if (isJson) {
+        console.log(JSON.stringify(res, null, 2));
+      } else {
+        console.log(res.report);
+      }
+      return action === "run" && res.passed === false ? 2 : 0;
     }
 
     case "status": {
@@ -469,19 +568,27 @@ Options:
     case "export": {
       const labDir = filteredArgs[1];
       if (!labDir) {
-        console.error("Usage: orion export <lab> [--json]");
+        console.error("Usage: orion export <lab> [--to-vega] [--hub <path>] [--json]");
+        return 1;
+      }
+      if (hubFlagMissingValue) {
+        console.error("Usage: --hub needs a folder path. orion export <lab> --to-vega --hub <path>");
         return 1;
       }
       const absDir = resolve(labDir);
-      const exportData = await exportLab(absDir);
+      const exportData = await exportLab(absDir, { toVega, hub: hubArg });
+      const inbox = exportData.vegaInbox;
       if (isJson) {
         console.log(JSON.stringify(exportData, null, 2));
       } else {
         console.log(exportData.summary);
         console.log(`Error log entries: ${exportData.errorLogEntries.length}`);
         console.log(`Vega cards: ${exportData.vegaCards.length}`);
+        if (inbox) {
+          for (const line of describeInboxOutcome(inbox)) console.log(line);
+        }
       }
-      return 0;
+      return inbox !== undefined && inbox.written === 0 && inbox.rejected.length > 0 ? 3 : 0;
     }
 
     default: {
