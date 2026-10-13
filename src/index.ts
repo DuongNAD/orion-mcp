@@ -82,6 +82,7 @@ Rules:
 - Never write the learner's solution: starter files contain only docstrings and TODOs; Orion never provides Level 5 hints (full solution code).
 - Warm-up material is an ISOMORPHIC problem (same solution structure, different surface), never the lab's own solution. orion_new_lab writes warm-up files only from text supplied in the spec (warmupFiles) or as TODO skeletons; it never generates code itself.
 - Tutoring ladder escalation: hints climb one level at a time (1: symptom, 2: guiding questions, 3: minimal counter-example, 4: pseudocode/signatures).
+- Before hinting, ground the concept behind a failing check in the course materials with Rigel (search_material).
 - Real tests: run locally with pytest, node --test, or declared commands; never guess results.
 - Predict first: always capture the mental model before execution; learning happens in the gap.
 - Learner fit: learner-facing text and READMEs in the learner's language (Vietnamese); no emoji.

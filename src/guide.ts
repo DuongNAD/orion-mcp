@@ -14,13 +14,15 @@ export const GUIDE_DOCS: Record<GuideTopic, string> = {
 Orion is the practice lab engine of the learner's MCP ecosystem. Named after the mythical hunter: practice is hunting your own bugs.
 
 ## Ecosystem (DuongNAD)
-- **Polaris**: Course architect, roadmaps, facts, and spaced-review error log.
-- **Aurora Slides**: Keynote-grade lessons, notebook pages, memory palaces, and interactive quizzes.
-- **SmartDrive-OS**: SSD storage governance, indexing, and fast learning search.
-- **Constellation**: MCP ecosystem registration, health checks, and contracts.
-- **Vega**: Adaptive spaced repetition memory engine (FSRS).
-- **Orion** (this server): Hands-on exercises checked by real tests, predict-then-run, a warm-up ladder (PRIMM) before the main task, tutoring ladder hints (never the solution), and attempt history.
-- **Mira** (sibling MCP): records a real line-by-line trace of the learner's own entry file; Level 3+ hints of a check with a \`trace\` link to it (\`mira_record { lab, call }\`).
+- **Polaris**: Course architect: sources, facts with locators, roadmap, schedule, error log.
+- **Aurora Slides**: Keynote-style lessons: quizzes, predict and trace slides, progress events.
+- **Vega**: FSRS memory engine and the single review queue (card inbox).
+- **Orion** (this server): Practice labs with real tests, tutoring ladder and PRIMM warm-up.
+- **Mira**: Code-tracing lab: real Python traces, line-by-line players with prediction gates.
+- **Rigel**: Grounded tutor: answers from the learner's lesson materials with [ref] citations.
+- **Sirius**: Execution loop: deadlines, triage, today router, session timer, weekly review.
+- **Constellation**: MCP registration, health checks and shared contracts.
+- **SmartDrive-OS**: SSD governance, index and learning search.
 
 ## Core Principles
 1. **Never the solution**: Orion never writes solution code. Starter files only contain docstrings, imports, and TODOs/NotImplementedError. Hints escalate from Level 1 to 4; Level 5 (full code) is never provided by Orion.
